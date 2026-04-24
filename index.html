@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Uncle Joe's Coffee Club</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=9" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="brand" href="#/">
+          <span class="brand-mark">UJ</span>
+          <span>
+            <strong>Uncle Joe's</strong>
+            <small>Live member frontend</small>
+          </span>
+        </a>
+
+        <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="site-nav">
+          Menu
+        </button>
+
+        <nav class="site-nav" id="site-nav">
+          <a href="#/">Home</a>
+          <a href="#/locations">Locations</a>
+          <a href="#/menu">Menu</a>
+          <a href="#/account">Account</a>
+          <a href="#/signin" id="signin-link">Sign in</a>
+          <button type="button" id="signout-button" class="ghost-button hidden">Sign out</button>
+        </nav>
+      </header>
+
+      <main id="app" class="app-shell" aria-live="polite"></main>
+    </div>
+
+    <script type="module" src="./src/app.js?v=9"></script>
+  </body>
+  </html>
