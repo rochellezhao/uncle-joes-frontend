@@ -1,8 +1,5 @@
 const API_BASE_URL = "https://uncle-joes-api-24755618771.us-central1.run.app";
 const SESSION_KEY = "uncle-joes-session";
-const MEMBER_ID_FALLBACKS = {
-  "nicole.rangel@fakemsu.edu": "6714eac4-4de0-4836-9fa1-f31356a95daf",
-};
 
 const state = {
   route: window.location.hash || "#/",
@@ -79,18 +76,45 @@ function updateAuthUI() {
 function loadSession() {
   try {
     const raw = window.localStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
+    return raw ? normalizeSession(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
 }
 
 function saveSession(session) {
-  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(normalizeSession(session)));
 }
 
 function clearSession() {
   window.localStorage.removeItem(SESSION_KEY);
+}
+
+function normalizeSession(session) {
+  if (!session) {
+    return null;
+  }
+
+  const loginPayloadMemberId = extractMemberId(session.loginPayload || {});
+  const profileMemberId = session.profile?.memberId || normalizeProfile(session.profile || {}).memberId;
+  const upgradedMemberId =
+    loginPayloadMemberId ||
+    profileMemberId ||
+    session.memberId ||
+    session.email ||
+    "";
+
+  return {
+    ...session,
+    memberId: upgradedMemberId,
+    profile: mergeProfiles(
+      {
+        memberId: upgradedMemberId,
+        email: session.email || "",
+      },
+      session.profile || {},
+    ),
+  };
 }
 
 async function apiRequest(path, options = {}) {
@@ -564,7 +588,6 @@ async function handleSignIn(event) {
     const memberId =
       extractMemberId(loginPayload) ||
       loginProfile.memberId ||
-      MEMBER_ID_FALLBACKS[email.toLowerCase()] ||
       (loginSucceeded ? email : "");
 
     if (!memberId) {
