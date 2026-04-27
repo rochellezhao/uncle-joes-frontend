@@ -12,6 +12,13 @@ const menuCache = {
   categories: null,
 };
 
+const locationsMapState = {
+  map: null,
+  markersLayer: null,
+};
+
+const locationDetailsCache = new Map();
+
 const app = document.querySelector("#app");
 const signInLink = document.querySelector("#signin-link");
 const signOutButton = document.querySelector("#signout-button");
@@ -275,24 +282,17 @@ async function renderLocations() {
 
   try {
     const payload = await apiRequest("/locations");
-    const addresses = Array.isArray(payload?.addresses) ? payload.addresses : [];
-    const locations = addresses
+    const locationRecords = extractLocationRecords(payload);
+    let locations = locationRecords
       .map((entry, index) => normalizeLocation(entry, index))
-      .sort((a, b) => {
-        const stateCompare = (a.stateName || a.state || "ZZ").localeCompare(b.stateName || b.state || "ZZ");
-        if (stateCompare !== 0) {
-          return stateCompare;
-        }
-
-        return (a.city || "").localeCompare(b.city || "");
-      });
+      .sort(sortLocations);
 
     renderFrame(`
       <section class="view">
         <div class="section-head">
           <div>
             <span class="eyebrow">Locations</span>
-            <h2>${escapeHtml(String(payload?.total_locations || locations.length))} live stores</h2>
+            <h2>${escapeHtml(String(payload?.total_locations || payload?.count || locations.length))} live stores</h2>
           </div>
         </div>
 
@@ -313,6 +313,19 @@ async function renderLocations() {
               <span>matching locations</span>
             </div>
           </div>
+          <section class="locations-map-panel">
+            <div class="locations-map-head">
+              <div>
+                <span class="eyebrow">Map view</span>
+                <h3>See store locations on the map</h3>
+              </div>
+              <p class="muted" id="locations-map-copy">Showing stores with map coordinates.</p>
+            </div>
+            <div id="locations-map" class="locations-map"></div>
+            <div id="locations-map-empty" class="helper-text hidden">
+              Map pins will appear here when location coordinates are available.
+            </div>
+          </section>
           <div id="locations-results"></div>
         </section>
       </section>
@@ -338,6 +351,7 @@ async function renderLocations() {
       const orderedStates = Object.keys(groupedLocations).sort((a, b) => a.localeCompare(b));
 
       countNode.textContent = String(filteredLocations.length);
+      renderLocationsMap(filteredLocations);
 
       if (!filteredLocations.length) {
         resultsNode.innerHTML = `
@@ -413,6 +427,11 @@ async function renderLocations() {
     renderLocationGroups();
     searchInput?.addEventListener("input", (event) => {
       renderLocationGroups(event.target.value);
+    });
+
+    hydrateLocationDetails(locations).then((hydratedLocations) => {
+      locations = hydratedLocations.sort(sortLocations);
+      renderLocationGroups(searchInput?.value || "");
     });
   } catch (error) {
     renderErrorFrame("Locations", error);
@@ -914,20 +933,58 @@ function renderNotFound() {
 
 function normalizeLocation(rawAddress, index) {
   const record = rawAddress && typeof rawAddress === "object" ? rawAddress : null;
+  const rawString = typeof rawAddress === "string" ? rawAddress.trim() : "";
+  const prefixedAddressMatch = rawString.match(/^([0-9a-f-]{36})\s*:\s*(.+)$/i);
+  const prefixedLocationId = prefixedAddressMatch ? prefixedAddressMatch[1] : "";
+  const prefixedAddress = prefixedAddressMatch ? prefixedAddressMatch[2] : rawString;
   const amenitiesRecord = record?.amenities && typeof record.amenities === "object" ? record.amenities : null;
+  const addressRecord =
+    record?.address && typeof record.address === "object"
+      ? record.address
+      : record?.location && typeof record.location === "object"
+        ? record.location
+        : null;
   const rawValue = firstNonEmpty([
+    typeof record?.address === "string" ? record.address : "",
     record?.address,
     record?.street_address,
     record?.streetAddress,
+    record?.address_one,
+    record?.addressOne,
+    record?.address_line_1,
+    record?.addressLine1,
     record?.full_address,
     record?.fullAddress,
+    record?.location_map_address,
+    record?.locationMapAddress,
     record?.location_address,
     record?.locationAddress,
+    addressRecord?.full_address,
+    addressRecord?.fullAddress,
+    addressRecord?.street_address,
+    addressRecord?.streetAddress,
+    addressRecord?.address_one,
+    addressRecord?.addressOne,
+    addressRecord?.address_line_1,
+    addressRecord?.addressLine1,
     record?.raw,
-    typeof rawAddress === "string" ? rawAddress : "",
+    prefixedAddress,
   ]);
   const trimmed = String(rawValue || "").trim();
   const match = trimmed.match(/^(.*)\s+([A-Za-z.' -]+)\s+([A-Z]{2})\s+(\d{5})(?:-\d{4})?$/);
+  const locationId = String(
+    firstNonEmpty([
+      prefixedLocationId,
+      record?.location_id,
+      record?.locationId,
+      record?.store_id,
+      record?.storeId,
+      record?.id,
+      record?.uuid,
+      record?.location?.id,
+      record?.location?.location_id,
+    ]) || "",
+  );
   const fallbackState = firstNonEmpty([record?.state, record?.state_code, record?.stateCode]) || "";
   const stateCode = (match?.[3] || fallbackState || "").trim().toUpperCase();
   const amenities = {
@@ -946,10 +1003,12 @@ function normalizeLocation(rawAddress, index) {
     driveThrough: normalizeAmenityValue(
       firstDefined([
         record?.drive_through,
+        record?.drive_thru,
         record?.driveThrough,
         record?.has_drive_through,
         record?.hasDriveThrough,
         amenitiesRecord?.drive_through,
+        amenitiesRecord?.drive_thru,
         amenitiesRecord?.driveThrough,
         amenitiesRecord?.has_drive_through,
         amenitiesRecord?.hasDriveThrough,
@@ -959,32 +1018,118 @@ function normalizeLocation(rawAddress, index) {
       firstDefined([
         record?.doordash,
         record?.door_dash,
+        record?.doorDash,
         record?.doordash_available,
         record?.doordashAvailable,
         record?.delivery_available,
         record?.deliveryAvailable,
         amenitiesRecord?.doordash,
         amenitiesRecord?.door_dash,
+        amenitiesRecord?.doorDash,
         amenitiesRecord?.doordash_available,
         amenitiesRecord?.doordashAvailable,
       ]),
     ),
   };
+  const latitude = normalizeCoordinate(firstDefined([
+    record?.latitude,
+    record?.lat,
+    record?.location_map_lat,
+    record?.locationMapLat,
+    record?.location_latitude,
+    record?.locationLatitude,
+    record?.geo?.latitude,
+    record?.geo?.lat,
+    record?.geolocation?.latitude,
+    record?.geolocation?.lat,
+    record?.coords?.latitude,
+    record?.coordinates?.latitude,
+    record?.coordinates?.lat,
+    Array.isArray(record?.coordinates) ? record.coordinates[1] : undefined,
+    addressRecord?.latitude,
+    addressRecord?.lat,
+  ]));
+  const longitude = normalizeCoordinate(firstDefined([
+    record?.longitude,
+    record?.lng,
+    record?.lon,
+    record?.location_map_lng,
+    record?.locationMapLng,
+    record?.location_longitude,
+    record?.locationLongitude,
+    record?.geo?.longitude,
+    record?.geo?.lng,
+    record?.geo?.lon,
+    record?.geolocation?.longitude,
+    record?.geolocation?.lng,
+    record?.geolocation?.lon,
+    record?.coords?.longitude,
+    record?.coordinates?.longitude,
+    record?.coordinates?.lng,
+    Array.isArray(record?.coordinates) ? record.coordinates[0] : undefined,
+    addressRecord?.longitude,
+    addressRecord?.lng,
+    addressRecord?.lon,
+  ]));
 
   if (!match) {
     return {
       index: index + 1,
       raw: trimmed,
       name: firstNonEmpty([record?.name, record?.location_name, record?.locationName, record?.store_name, record?.storeName]) || "",
-      street: firstNonEmpty([record?.street, record?.street_address, record?.streetAddress, trimmed]) || "",
-      city: firstNonEmpty([record?.city, record?.location_city, record?.locationCity]) || "",
+      street: firstNonEmpty([
+        record?.street,
+        record?.street_address,
+        record?.streetAddress,
+        record?.address_one,
+        record?.addressOne,
+        record?.address_line_1,
+        record?.addressLine1,
+        addressRecord?.street,
+        addressRecord?.street_address,
+        addressRecord?.streetAddress,
+        addressRecord?.address_one,
+        addressRecord?.addressOne,
+        addressRecord?.address_line_1,
+        addressRecord?.addressLine1,
+        trimmed,
+      ]) || "",
+      city: firstNonEmpty([record?.city, record?.location_city, record?.locationCity, addressRecord?.city]) || "",
       state: stateCode,
       stateName: getStateName(stateCode),
-      zip: firstNonEmpty([record?.zip, record?.zip_code, record?.zipCode, record?.postal_code, record?.postalCode]) || "",
+      zip: firstNonEmpty([
+        record?.zip,
+        record?.zip_code,
+        record?.zipCode,
+        record?.postal_code,
+        record?.postalCode,
+        addressRecord?.zip,
+        addressRecord?.zip_code,
+        addressRecord?.zipCode,
+        addressRecord?.postal_code,
+        addressRecord?.postalCode,
+      ]) || "",
       phone: formatPhoneNumber(
-        firstNonEmpty([record?.phone, record?.phone_number, record?.phoneNumber, record?.store_phone, record?.storePhone]) || "",
+        firstNonEmpty([
+          record?.phone,
+          record?.phone_number,
+          record?.phoneNumber,
+          record?.store_phone,
+          record?.storePhone,
+          record?.telephone,
+          record?.contact?.phone,
+          record?.contact?.phone_number,
+          record?.contact?.phoneNumber,
+          addressRecord?.phone,
+          addressRecord?.phone_number,
+          addressRecord?.phoneNumber,
+        ]) || "",
       ),
       amenities,
+      latitude,
+      longitude,
+      locationId,
+      sourceRecord: record || rawAddress,
     };
   }
 
@@ -993,15 +1138,280 @@ function normalizeLocation(rawAddress, index) {
     raw: trimmed,
     name: firstNonEmpty([record?.name, record?.location_name, record?.locationName, record?.store_name, record?.storeName]) || "",
     street: match[1].trim(),
-    city: firstNonEmpty([record?.city, record?.location_city, record?.locationCity, match[2].trim()]) || "",
+    city: firstNonEmpty([record?.city, record?.location_city, record?.locationCity, addressRecord?.city, match[2].trim()]) || "",
     state: stateCode,
     stateName: getStateName(stateCode),
-    zip: firstNonEmpty([record?.zip, record?.zip_code, record?.zipCode, record?.postal_code, record?.postalCode, match[4].trim()]) || "",
+    zip: firstNonEmpty([
+      record?.zip,
+      record?.zip_code,
+      record?.zipCode,
+      record?.postal_code,
+      record?.postalCode,
+      addressRecord?.zip,
+      addressRecord?.zip_code,
+      addressRecord?.zipCode,
+      addressRecord?.postal_code,
+      addressRecord?.postalCode,
+      match[4].trim(),
+    ]) || "",
     phone: formatPhoneNumber(
-      firstNonEmpty([record?.phone, record?.phone_number, record?.phoneNumber, record?.store_phone, record?.storePhone]) || "",
+      firstNonEmpty([
+        record?.phone,
+        record?.phone_number,
+        record?.phoneNumber,
+        record?.store_phone,
+        record?.storePhone,
+        record?.telephone,
+        record?.contact?.phone,
+        record?.contact?.phone_number,
+        record?.contact?.phoneNumber,
+        addressRecord?.phone,
+        addressRecord?.phone_number,
+        addressRecord?.phoneNumber,
+      ]) || "",
     ),
     amenities,
+    latitude,
+    longitude,
+    locationId,
+    sourceRecord: record || rawAddress,
   };
+}
+
+async function hydrateLocationDetails(locations) {
+  const locationsWithIds = locations.filter((location) => location.locationId);
+
+  if (!locationsWithIds.length) {
+    return locations;
+  }
+
+  const hydratedById = new Map();
+
+  await Promise.all(
+    locationsWithIds.map(async (location) => {
+      if (locationDetailsCache.has(location.locationId)) {
+        hydratedById.set(location.locationId, locationDetailsCache.get(location.locationId));
+        return;
+      }
+
+      try {
+        const detailPayload = await apiRequest(`/locations/${encodeURIComponent(location.locationId)}`);
+        const detailRecord = extractLocationDetailRecord(detailPayload);
+        const mergedLocation = normalizeLocation(
+          mergeLocationRecords(location.sourceRecord, detailRecord),
+          location.index - 1,
+        );
+        locationDetailsCache.set(location.locationId, mergedLocation);
+        hydratedById.set(location.locationId, mergedLocation);
+      } catch {
+        locationDetailsCache.set(location.locationId, location);
+        hydratedById.set(location.locationId, location);
+      }
+    }),
+  );
+
+  return locations.map((location) => hydratedById.get(location.locationId) || location);
+}
+
+function extractLocationDetailRecord(payload) {
+  return (
+    payload?.location ||
+    payload?.store ||
+    payload?.data?.location ||
+    payload?.data?.store ||
+    payload?.data ||
+    payload ||
+    {}
+  );
+}
+
+function mergeLocationRecords(baseRecord, detailRecord) {
+  const base = baseRecord && typeof baseRecord === "object" ? baseRecord : {};
+  const detail = detailRecord && typeof detailRecord === "object" ? detailRecord : {};
+  return {
+    ...base,
+    ...detail,
+    address:
+      detail.address && typeof detail.address === "object"
+        ? { ...(base.address || {}), ...detail.address }
+        : detail.address || base.address,
+    location:
+      detail.location && typeof detail.location === "object"
+        ? { ...(base.location || {}), ...detail.location }
+        : detail.location || base.location,
+    contact:
+      detail.contact && typeof detail.contact === "object"
+        ? { ...(base.contact || {}), ...detail.contact }
+        : detail.contact || base.contact,
+    amenities:
+      detail.amenities && typeof detail.amenities === "object"
+        ? { ...(base.amenities || {}), ...detail.amenities }
+        : detail.amenities || base.amenities,
+    coordinates:
+      detail.coordinates && typeof detail.coordinates === "object" && !Array.isArray(detail.coordinates)
+        ? { ...(base.coordinates || {}), ...detail.coordinates }
+        : detail.coordinates || base.coordinates,
+  };
+}
+
+function sortLocations(a, b) {
+  const stateCompare = (a.stateName || a.state || "ZZ").localeCompare(b.stateName || b.state || "ZZ");
+  if (stateCompare !== 0) {
+    return stateCompare;
+  }
+
+  return (a.city || "").localeCompare(b.city || "");
+}
+
+function extractLocationRecords(payload) {
+  const directCandidates = [
+    payload,
+    payload?.locations,
+    payload?.stores,
+    payload?.addresses,
+    payload?.data,
+    payload?.data?.locations,
+    payload?.data?.stores,
+    payload?.data?.addresses,
+  ].filter(Array.isArray);
+
+  const discoveredCandidates = [];
+
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    for (const value of Object.values(payload)) {
+      if (Array.isArray(value)) {
+        discoveredCandidates.push(value);
+      }
+    }
+  }
+
+  if (payload?.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+    for (const value of Object.values(payload.data)) {
+      if (Array.isArray(value)) {
+        discoveredCandidates.push(value);
+      }
+    }
+  }
+
+  const candidates = [...directCandidates, ...discoveredCandidates];
+
+  const scoredCandidates = candidates
+    .map((candidate) => ({ candidate, score: scoreLocationCandidate(candidate) }))
+    .filter(({ candidate }) => candidate.length > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return scoredCandidates[0]?.candidate || [];
+}
+
+function scoreLocationCandidate(candidate) {
+  if (!Array.isArray(candidate) || !candidate.length) {
+    return -1;
+  }
+
+  const firstItem = candidate[0];
+
+  if (typeof firstItem === "string") {
+    return 1;
+  }
+
+  if (!firstItem || typeof firstItem !== "object") {
+    return 0;
+  }
+
+  let score = 10;
+
+  if (firstItem.id || firstItem.location_id || firstItem.store_id) {
+    score += 20;
+  }
+
+  if (firstItem.phone_number || firstItem.phone || firstItem.store_phone) {
+    score += 12;
+  }
+
+  if (firstItem.location_map_lat || firstItem.latitude || firstItem.lat) {
+    score += 12;
+  }
+
+  if (firstItem.location_map_lng || firstItem.longitude || firstItem.lng) {
+    score += 12;
+  }
+
+  if (firstItem.address_one || firstItem.location_map_address || firstItem.city || firstItem.state) {
+    score += 8;
+  }
+
+  if (typeof firstItem.wifi === "boolean" || typeof firstItem.drive_thru === "boolean") {
+    score += 6;
+  }
+
+  return score;
+}
+
+function renderLocationsMap(locations) {
+  const mapNode = document.querySelector("#locations-map");
+  const mapCopyNode = document.querySelector("#locations-map-copy");
+  const emptyNode = document.querySelector("#locations-map-empty");
+
+  if (!mapNode || !mapCopyNode || !emptyNode) {
+    return;
+  }
+
+  const mappableLocations = locations.filter(
+    (location) => Number.isFinite(location.latitude) && Number.isFinite(location.longitude),
+  );
+
+  if (!mappableLocations.length || typeof window.L === "undefined") {
+    mapNode.classList.add("hidden");
+    emptyNode.classList.remove("hidden");
+    mapCopyNode.textContent = locations.length
+      ? "Map pins appear when stores include latitude and longitude."
+      : "Search results will appear on the map when matching stores include coordinates.";
+    if (locationsMapState.map) {
+      locationsMapState.map.remove();
+      locationsMapState.map = null;
+      locationsMapState.markersLayer = null;
+    }
+    return;
+  }
+
+  mapNode.classList.remove("hidden");
+  emptyNode.classList.add("hidden");
+  mapCopyNode.textContent = `${mappableLocations.length} store${mappableLocations.length === 1 ? "" : "s"} shown on the map.`;
+
+  if (!locationsMapState.map) {
+    locationsMapState.map = window.L.map(mapNode, {
+      scrollWheelZoom: false,
+    }).setView([mappableLocations[0].latitude, mappableLocations[0].longitude], 5);
+
+    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(locationsMapState.map);
+
+    locationsMapState.markersLayer = window.L.layerGroup().addTo(locationsMapState.map);
+  }
+
+  locationsMapState.markersLayer.clearLayers();
+
+  const bounds = [];
+  mappableLocations.forEach((location) => {
+    const marker = window.L.marker([location.latitude, location.longitude]);
+    marker.bindPopup(`
+      <strong>${escapeHtml(location.name || location.street || "Uncle Joe's")}</strong><br />
+      ${escapeHtml([location.city, location.stateName || location.state].filter(Boolean).join(", "))}
+    `);
+    marker.addTo(locationsMapState.markersLayer);
+    bounds.push([location.latitude, location.longitude]);
+  });
+
+  if (bounds.length === 1) {
+    locationsMapState.map.setView(bounds[0], 11);
+  } else {
+    locationsMapState.map.fitBounds(bounds, { padding: [28, 28] });
+  }
+
+  setTimeout(() => {
+    locationsMapState.map?.invalidateSize();
+  }, 0);
 }
 
 function normalizeAmenityValue(value) {
@@ -1024,6 +1434,11 @@ function normalizeAmenityValue(value) {
   }
 
   return null;
+}
+
+function normalizeCoordinate(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function renderAmenityPill(label, value) {
