@@ -7,6 +7,11 @@ const state = {
   navOpen: false,
 };
 
+const menuCache = {
+  items: null,
+  categories: null,
+};
+
 const app = document.querySelector("#app");
 const signInLink = document.querySelector("#signin-link");
 const signOutButton = document.querySelector("#signout-button");
@@ -364,7 +369,8 @@ async function renderLocations() {
                         (location) => `
                           <article class="card">
                             <span class="eyebrow">${escapeHtml(location.city || "Location")}</span>
-                            <h4 class="card-title">${escapeHtml(location.street || "Address unavailable")}</h4>
+                            <h4 class="card-title">${escapeHtml(location.name || location.street || "Address unavailable")}</h4>
+                            ${location.name && location.street ? `<p class="muted">${escapeHtml(location.street)}</p>` : ""}
                             <div class="detail-list">
                               <div class="detail-row">
                                 <span class="detail-label">City</span>
@@ -380,7 +386,15 @@ async function renderLocations() {
                               </div>
                               <div class="detail-row">
                                 <span class="detail-label">Phone</span>
-                                <span class="detail-value">Unavailable</span>
+                                <span class="detail-value">${escapeHtml(location.phone || "Unavailable")}</span>
+                              </div>
+                            </div>
+                            <div class="amenities-section">
+                              <span class="detail-label">Amenities</span>
+                              <div class="amenities-grid">
+                                ${renderAmenityPill("Wi-Fi", location.amenities.wifi)}
+                                ${renderAmenityPill("Drive-through", location.amenities.driveThrough)}
+                                ${renderAmenityPill("DoorDash", location.amenities.doordash)}
                               </div>
                             </div>
                           </article>
@@ -409,19 +423,30 @@ async function renderMenu() {
   renderLoadingFrame("Menu", "Loading menu and categories");
 
   try {
-    const [menuPayload, categoriesPayload] = await Promise.all([
-      apiRequest("/menu"),
-      apiRequest("/menu/categories"),
-    ]);
+    if (!menuCache.items || !menuCache.categories) {
+      const [menuPayload, categoriesPayload] = await Promise.all([
+        apiRequest("/menu"),
+        apiRequest("/menu/categories"),
+      ]);
 
-    const items = Array.isArray(menuPayload?.items) ? menuPayload.items.map(normalizeMenuItem) : [];
-    const categories = Array.isArray(categoriesPayload?.categories) ? categoriesPayload.categories : [];
+      menuCache.items = Array.isArray(menuPayload?.items) ? menuPayload.items.map(normalizeMenuItem) : [];
+      menuCache.categories = Array.isArray(categoriesPayload?.categories) ? categoriesPayload.categories : [];
+    }
+
+    const items = menuCache.items;
+    const categories = menuCache.categories;
 
     const query = new URLSearchParams(state.route.split("?")[1] || "");
     const activeCategory = query.get("category") || "all";
+    const activeSearch = query.get("search") || "";
 
-    const filteredItems =
-      activeCategory === "all" ? items : items.filter((item) => item.category === activeCategory);
+    const filteredItems = items.filter((item) => {
+      const matchesCategory = activeCategory === "all" ? true : item.category === activeCategory;
+      const matchesSearch = activeSearch
+        ? item.name.toLowerCase().includes(activeSearch.toLowerCase())
+        : true;
+      return matchesCategory && matchesSearch;
+    });
 
     const groupedItems = groupBy(filteredItems, (item) => item.category || "Other");
 
@@ -432,20 +457,36 @@ async function renderMenu() {
             <span class="eyebrow">Menu</span>
             <h2>${escapeHtml(String(items.length))} live menu entries</h2>
           </div>
-          <div class="menu-toolbar">
-            <label class="helper-text" for="category-filter">Category</label>
-            <select class="select" id="category-filter">
-              <option value="all"${activeCategory === "all" ? " selected" : ""}>All categories</option>
-              ${categories
-                .map(
-                  (category) =>
-                    `<option value="${escapeAttribute(category)}"${
-                      activeCategory === category ? " selected" : ""
-                    }>${escapeHtml(category)}</option>`,
-                )
-                .join("")}
-            </select>
-          </div>
+          <form class="menu-toolbar" id="menu-filter-form">
+            <div class="field menu-control menu-search-control">
+              <label class="helper-text" for="menu-search">Search for an item</label>
+              <div class="menu-search-row">
+                <input
+                  class="input search"
+                  id="menu-search"
+                  type="search"
+                  placeholder="Try Latte or Mocha"
+                  value="${escapeAttribute(activeSearch)}"
+                  autocomplete="off"
+                />
+                <button class="primary-button menu-search-button" type="submit">Search</button>
+              </div>
+            </div>
+            <div class="field menu-control">
+              <label class="helper-text" for="category-filter">Category</label>
+              <select class="select" id="category-filter">
+                <option value="all"${activeCategory === "all" ? " selected" : ""}>All categories</option>
+                ${categories
+                  .map(
+                    (category) =>
+                      `<option value="${escapeAttribute(category)}"${
+                        activeCategory === category ? " selected" : ""
+                      }>${escapeHtml(category)}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </div>
+          </form>
         </div>
 
         <div class="menu-groups">
@@ -455,6 +496,14 @@ async function renderMenu() {
               Some drinks include limited details right now, so a few descriptions may be shorter than others.
             </span>
           </div>
+          ${
+            !filteredItems.length
+              ? `<div class="empty-state">
+                  <strong>No menu items found</strong>
+                  <p class="muted">Try a different item name or category.</p>
+                </div>`
+              : ""
+          }
           ${Object.entries(groupedItems)
             .map(
               ([category, categoryItems]) => `
@@ -496,10 +545,28 @@ async function renderMenu() {
       </section>
     `);
 
-    document.querySelector("#category-filter")?.addEventListener("change", (event) => {
-      const nextCategory = event.target.value;
-      navigate(nextCategory === "all" ? "#/menu" : `#/menu?category=${encodeURIComponent(nextCategory)}`);
+    const updateMenuFilters = () => {
+      const nextCategory = document.querySelector("#category-filter")?.value || "all";
+      const nextSearch = document.querySelector("#menu-search")?.value?.trim() || "";
+      const nextQuery = new URLSearchParams();
+
+      if (nextCategory !== "all") {
+        nextQuery.set("category", nextCategory);
+      }
+
+      if (nextSearch) {
+        nextQuery.set("search", nextSearch);
+      }
+
+      navigate(nextQuery.toString() ? `#/menu?${nextQuery.toString()}` : "#/menu");
+    };
+
+    document.querySelector("#menu-filter-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      updateMenuFilters();
     });
+
+    document.querySelector("#category-filter")?.addEventListener("change", updateMenuFilters);
   } catch (error) {
     renderErrorFrame("Menu", error);
   }
@@ -762,7 +829,7 @@ async function renderAccount() {
                     .map(
                       (order) => `
                         <article class="order-card">
-                          <div class="detail-row">
+                          <div class="detail-row order-card-top">
                             <div>
                               <strong>Order ${escapeHtml(order.orderId)}</strong>
                               <div class="muted">${escapeHtml(order.date)}</div>
@@ -775,19 +842,45 @@ async function renderAccount() {
                           </div>
                           ${
                             order.lineItems.length
-                              ? `<div class="line-items">
-                                  ${order.lineItems
-                                    .map(
-                                      (item) => `
-                                        <div class="line-item">
-                                          <span>${escapeHtml(item.label)}</span>
-                                          <span>${escapeHtml(item.value)}</span>
-                                        </div>
-                                      `,
-                                    )
-                                    .join("")}
-                                </div>`
-                              : `<div class="helper-text">No line items were returned by this order response.</div>`
+                              ? `<details class="order-details">
+                                  <summary>
+                                    <span>View items</span>
+                                    <span>${escapeHtml(String(order.lineItems.length))} item${order.lineItems.length === 1 ? "" : "s"}</span>
+                                  </summary>
+                                  <div class="line-items">
+                                    ${order.lineItems
+                                      .map(
+                                        (item) => `
+                                          <div class="line-item line-item-rich">
+                                            <div>
+                                              <strong>${escapeHtml(item.name)}</strong>
+                                              <div class="helper-text">
+                                                ${escapeHtml(item.size)} · Qty ${escapeHtml(String(item.quantity))}${
+                                                  item.quantity > 1 && item.unitPriceText !== item.displayPrice
+                                                    ? ` · ${escapeHtml(item.unitPriceText)} each`
+                                                    : ""
+                                                }
+                                              </div>
+                                            </div>
+                                            <span>${escapeHtml(item.displayPrice)}</span>
+                                          </div>
+                                        `,
+                                      )
+                                      .join("")}
+                                    ${
+                                      order.adjustmentText
+                                        ? `<div class="line-item line-item-rich order-adjustment-row">
+                                            <div>
+                                              <strong>${escapeHtml(order.adjustmentLabel)}</strong>
+                                              <div class="helper-text">Applied to match the final order total.</div>
+                                            </div>
+                                            <span>${escapeHtml(order.adjustmentText)}</span>
+                                          </div>`
+                                        : ""
+                                    }
+                                  </div>
+                                </details>`
+                              : `<div class="helper-text">Line item details are not available for this order yet.</div>`
                           }
                         </article>
                       `,
@@ -820,32 +913,139 @@ function renderNotFound() {
 }
 
 function normalizeLocation(rawAddress, index) {
-  const trimmed = String(rawAddress || "").trim();
+  const record = rawAddress && typeof rawAddress === "object" ? rawAddress : null;
+  const amenitiesRecord = record?.amenities && typeof record.amenities === "object" ? record.amenities : null;
+  const rawValue = firstNonEmpty([
+    record?.address,
+    record?.street_address,
+    record?.streetAddress,
+    record?.full_address,
+    record?.fullAddress,
+    record?.location_address,
+    record?.locationAddress,
+    record?.raw,
+    typeof rawAddress === "string" ? rawAddress : "",
+  ]);
+  const trimmed = String(rawValue || "").trim();
   const match = trimmed.match(/^(.*)\s+([A-Za-z.' -]+)\s+([A-Z]{2})\s+(\d{5})(?:-\d{4})?$/);
+  const fallbackState = firstNonEmpty([record?.state, record?.state_code, record?.stateCode]) || "";
+  const stateCode = (match?.[3] || fallbackState || "").trim().toUpperCase();
+  const amenities = {
+    wifi: normalizeAmenityValue(
+      firstDefined([
+        record?.wifi,
+        record?.wi_fi,
+        record?.wifi_available,
+        record?.wifiAvailable,
+        amenitiesRecord?.wifi,
+        amenitiesRecord?.wi_fi,
+        amenitiesRecord?.wifi_available,
+        amenitiesRecord?.wifiAvailable,
+      ]),
+    ),
+    driveThrough: normalizeAmenityValue(
+      firstDefined([
+        record?.drive_through,
+        record?.driveThrough,
+        record?.has_drive_through,
+        record?.hasDriveThrough,
+        amenitiesRecord?.drive_through,
+        amenitiesRecord?.driveThrough,
+        amenitiesRecord?.has_drive_through,
+        amenitiesRecord?.hasDriveThrough,
+      ]),
+    ),
+    doordash: normalizeAmenityValue(
+      firstDefined([
+        record?.doordash,
+        record?.door_dash,
+        record?.doordash_available,
+        record?.doordashAvailable,
+        record?.delivery_available,
+        record?.deliveryAvailable,
+        amenitiesRecord?.doordash,
+        amenitiesRecord?.door_dash,
+        amenitiesRecord?.doordash_available,
+        amenitiesRecord?.doordashAvailable,
+      ]),
+    ),
+  };
 
   if (!match) {
     return {
       index: index + 1,
       raw: trimmed,
-      street: trimmed,
-      city: "",
-      state: "",
-      stateName: "",
-      zip: "",
+      name: firstNonEmpty([record?.name, record?.location_name, record?.locationName, record?.store_name, record?.storeName]) || "",
+      street: firstNonEmpty([record?.street, record?.street_address, record?.streetAddress, trimmed]) || "",
+      city: firstNonEmpty([record?.city, record?.location_city, record?.locationCity]) || "",
+      state: stateCode,
+      stateName: getStateName(stateCode),
+      zip: firstNonEmpty([record?.zip, record?.zip_code, record?.zipCode, record?.postal_code, record?.postalCode]) || "",
+      phone: formatPhoneNumber(
+        firstNonEmpty([record?.phone, record?.phone_number, record?.phoneNumber, record?.store_phone, record?.storePhone]) || "",
+      ),
+      amenities,
     };
   }
-
-  const stateCode = match[3].trim();
 
   return {
     index: index + 1,
     raw: trimmed,
+    name: firstNonEmpty([record?.name, record?.location_name, record?.locationName, record?.store_name, record?.storeName]) || "",
     street: match[1].trim(),
-    city: match[2].trim(),
+    city: firstNonEmpty([record?.city, record?.location_city, record?.locationCity, match[2].trim()]) || "",
     state: stateCode,
     stateName: getStateName(stateCode),
-    zip: match[4].trim(),
+    zip: firstNonEmpty([record?.zip, record?.zip_code, record?.zipCode, record?.postal_code, record?.postalCode, match[4].trim()]) || "",
+    phone: formatPhoneNumber(
+      firstNonEmpty([record?.phone, record?.phone_number, record?.phoneNumber, record?.store_phone, record?.storePhone]) || "",
+    ),
+    amenities,
   };
+}
+
+function normalizeAmenityValue(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+
+  if (["true", "yes", "y", "available", "included", "1"].includes(normalized)) {
+    return true;
+  }
+
+  if (["false", "no", "n", "unavailable", "not available", "none", "0"].includes(normalized)) {
+    return false;
+  }
+
+  return null;
+}
+
+function renderAmenityPill(label, value) {
+  const statusLabel = value === true ? "Available" : value === false ? "Not available" : "";
+  const toneClass = value === true ? "is-available" : value === false ? "is-unavailable" : "is-unknown";
+
+  return `
+    <span class="amenity-pill ${toneClass}">
+      <strong>${escapeHtml(label)}</strong>
+      ${statusLabel ? `<span>${escapeHtml(statusLabel)}</span>` : ""}
+    </span>
+  `;
+}
+
+function formatPhoneNumber(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+
+  return String(value || "").trim();
 }
 
 function getStateName(stateCode) {
@@ -1051,32 +1251,64 @@ function normalizeOrders(payload) {
     ? payload
     : Array.isArray(payload?.orders)
       ? payload.orders
+      : Array.isArray(payload?.data?.orders)
+        ? payload.data.orders
       : Array.isArray(payload?.data)
         ? payload.data
         : [];
+  const rawOrderItems = Array.isArray(payload?.order_items)
+    ? payload.order_items
+    : Array.isArray(payload?.orderItems)
+      ? payload.orderItems
+      : Array.isArray(payload?.data?.order_items)
+        ? payload.data.order_items
+        : Array.isArray(payload?.data?.orderItems)
+          ? payload.data.orderItems
+          : [];
 
   const orders = rawOrders.map((order, index) => {
+    const orderId = String(firstNonEmpty([order?.order_id, order?.orderId, order?.id]) || `#${index + 1}`);
+    const orderTotalValue = parseMoney(firstDefined([
+      order?.order_total,
+      order?.total,
+      order?.amount,
+      order?.final_total,
+      order?.finalTotal,
+    ]));
+    const matchedOrderItems = rawOrderItems.filter((item) => {
+      const itemOrderId = firstNonEmpty([item?.order_id, item?.orderId, item?.id_order]);
+      return itemOrderId && String(itemOrderId) === orderId;
+    });
     const lineItemsSource = Array.isArray(order?.line_items)
       ? order.line_items
       : Array.isArray(order?.lineItems)
         ? order.lineItems
+        : Array.isArray(order?.order_items)
+          ? order.order_items
+          : Array.isArray(order?.orderItems)
+            ? order.orderItems
         : Array.isArray(order?.items)
           ? order.items
-          : [];
+          : matchedOrderItems;
+
+    const lineItems = lineItemsSource.map((item, itemIndex) => normalizeLineItem(item, itemIndex));
+    const lineItemsSubtotal = lineItems.reduce((sum, item) => sum + item.lineTotalValue, 0);
+    const adjustmentValue = Number.isFinite(orderTotalValue) ? roundCurrency(orderTotalValue - lineItemsSubtotal) : 0;
+    const hasAdjustment = Math.abs(adjustmentValue) >= 0.01;
 
     return {
-      orderId: String(
-        firstNonEmpty([order?.order_id, order?.orderId, order?.id]) || `#${index + 1}`,
-      ),
+      orderId,
       date: formatDate(firstNonEmpty([order?.order_date, order?.date, order?.created_at, order?.createdAt])),
-      total: formatCurrency(firstDefined([order?.order_total, order?.total, order?.amount])),
+      total: formatCurrency(orderTotalValue),
       location: firstNonEmpty([
         order?.location_name,
         order?.locationName,
         compactLocationLabel(order),
       ]),
       status: firstNonEmpty([order?.status, order?.order_status]) || "",
-      lineItems: lineItemsSource.map((item, itemIndex) => normalizeLineItem(item, itemIndex)),
+      lineItems,
+      adjustmentLabel: adjustmentValue < 0 ? "Discount or reward" : "Added charges",
+      adjustmentText: hasAdjustment ? formatSignedCurrency(adjustmentValue) : "",
     };
   });
 
@@ -1085,14 +1317,90 @@ function normalizeOrders(payload) {
 }
 
 function normalizeLineItem(item, index) {
-  const quantity = firstDefined([item?.quantity, item?.qty, item?.count]);
-  const price = firstDefined([item?.price, item?.unit_price, item?.unitPrice, item?.total]);
-  const name = firstNonEmpty([item?.name, item?.item_name, item?.itemName]) || `Item ${index + 1}`;
+  const quantity = Number(firstDefined([item?.quantity, item?.qty, item?.count]) || 1);
+  const unitPriceValue = parseMoney(firstDefined([
+    item?.price,
+    item?.unit_price,
+    item?.unitPrice,
+    item?.item_price,
+    item?.price_per_item,
+    item?.pricePerItem,
+  ]));
+  const lineTotalValue = parseMoney(firstDefined([
+    item?.line_price,
+    item?.linePrice,
+    item?.line_total,
+    item?.lineTotal,
+    item?.total,
+    item?.extended_price,
+    item?.extendedPrice,
+  ]));
+  const name =
+    firstNonEmpty([
+      item?.name,
+      item?.item_name,
+      item?.itemName,
+      item?.menu_item_name,
+      item?.menuItemName,
+      item?.product_name,
+      item?.productName,
+    ]) || `Item ${index + 1}`;
+  const size = firstNonEmpty([
+    item?.size,
+    item?.item_size,
+    item?.itemSize,
+    item?.menu_item_size,
+    item?.menuItemSize,
+    item?.variant_name,
+    item?.variantName,
+  ]) || "Standard";
+  const fallbackUnitPriceValue = Number.isFinite(unitPriceValue)
+    ? unitPriceValue
+    : quantity > 0 && Number.isFinite(lineTotalValue)
+      ? roundCurrency(lineTotalValue / quantity)
+      : null;
+  const fallbackLineTotalValue = Number.isFinite(lineTotalValue)
+    ? lineTotalValue
+    : Number.isFinite(fallbackUnitPriceValue)
+      ? roundCurrency(fallbackUnitPriceValue * quantity)
+      : 0;
 
   return {
-    label: quantity ? `${quantity} x ${name}` : name,
-    value: formatCurrency(price) === "$0.00" && price == null ? "Included" : formatCurrency(price),
+    name,
+    size,
+    quantity,
+    unitPriceText:
+      fallbackUnitPriceValue == null && fallbackLineTotalValue === 0
+        ? "Included"
+        : formatCurrency(fallbackUnitPriceValue ?? 0),
+    displayPrice:
+      fallbackUnitPriceValue == null && fallbackLineTotalValue === 0
+        ? "Included"
+        : formatCurrency(fallbackLineTotalValue),
+    lineTotalValue: fallbackLineTotalValue,
   };
+}
+
+function parseMoney(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  const numeric = Number(String(value).replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function roundCurrency(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function formatSignedCurrency(value) {
+  const rounded = roundCurrency(value);
+  return `${rounded >= 0 ? "+" : "-"}${formatCurrency(Math.abs(rounded))}`;
 }
 
 function extractMemberId(payload) {
