@@ -1,15 +1,18 @@
 const API_BASE_URL = "https://uncle-joes-api-24755618771.us-central1.run.app";
 const SESSION_KEY = "uncle-joes-session";
+const MENU_CATALOG_URL = "https://raw.githubusercontent.com/mgmt54500-sp26/uncle-joes-setup/main/uncle_joes_menu.csv";
 
 const state = {
   route: window.location.hash || "#/",
   auth: loadSession(),
   navOpen: false,
+  orderDraft: null,
 };
 
 const menuCache = {
   items: null,
   categories: null,
+  catalogItems: null,
 };
 
 const locationsMapState = {
@@ -18,6 +21,7 @@ const locationsMapState = {
 };
 
 const locationDetailsCache = new Map();
+let orderMenuItemOptions = [];
 
 const app = document.querySelector("#app");
 const signInLink = document.querySelector("#signin-link");
@@ -29,6 +33,8 @@ const routes = {
   "#/": renderHome,
   "#/locations": renderLocations,
   "#/menu": renderMenu,
+  "#/order": renderOrderForm,
+  "#/register": renderRegister,
   "#/signin": renderSignIn,
   "#/account": renderAccount,
 };
@@ -147,10 +153,7 @@ async function apiRequest(path, options = {}) {
   }
 
   if (!response.ok) {
-    const message =
-      payload?.detail ||
-      payload?.message ||
-      `Request failed with status ${response.status}`;
+    const message = extractApiErrorMessage(payload, response.status);
     throw new Error(message);
   }
 
@@ -222,6 +225,9 @@ function renderHome() {
             <a class="primary-button" href="#/menu">See what's brewing</a>
             <a class="secondary-button" href="${state.auth?.memberId ? "#/account" : "#/signin"}">
               ${state.auth?.memberId ? "Open my account" : "Member sign in"}
+            </a>
+            <a class="secondary-button" href="${state.auth?.memberId ? "#/order" : "#/signin"}">
+              ${state.auth?.memberId ? "Start an order" : "Sign in to order"}
             </a>
           </div>
           <div class="welcome-strip">
@@ -442,15 +448,7 @@ async function renderMenu() {
   renderLoadingFrame("Menu", "Loading menu and categories");
 
   try {
-    if (!menuCache.items || !menuCache.categories) {
-      const [menuPayload, categoriesPayload] = await Promise.all([
-        apiRequest("/menu"),
-        apiRequest("/menu/categories"),
-      ]);
-
-      menuCache.items = Array.isArray(menuPayload?.items) ? menuPayload.items.map(normalizeMenuItem) : [];
-      menuCache.categories = Array.isArray(categoriesPayload?.categories) ? categoriesPayload.categories : [];
-    }
+    await ensureMenuCache();
 
     const items = menuCache.items;
     const categories = menuCache.categories;
@@ -509,6 +507,15 @@ async function renderMenu() {
         </div>
 
         <div class="menu-groups">
+          <div class="status-box success">
+            <strong>Ready to order?</strong>
+            <span>${state.auth?.memberId ? "Use the order form to send item IDs and quantities to the API." : "Sign in first to place an order from your member account."}</span>
+            <div>
+              <a class="secondary-button" href="${state.auth?.memberId ? "#/order" : "#/signin"}">
+                ${state.auth?.memberId ? "Open order form" : "Sign in to order"}
+              </a>
+            </div>
+          </div>
           <div class="status-box">
             <strong>Good to know</strong>
             <span>
@@ -591,6 +598,380 @@ async function renderMenu() {
   }
 }
 
+async function renderOrderForm() {
+  if (!state.auth?.memberId) {
+    navigate("#/signin");
+    return;
+  }
+
+  try {
+    await ensureMenuCache();
+
+    const menuReferenceItems = menuCache.items.filter((item) => item.itemId);
+    orderMenuItemOptions = menuReferenceItems;
+    const locationsPayload = await apiRequest("/locations");
+    const locationOptions = extractLocationRecords(locationsPayload)
+      .map((entry, index) => normalizeLocation(entry, index))
+      .sort(sortLocations)
+      .filter((location) => location.locationId);
+
+    if (state.orderDraft?.memberId) {
+      renderOrderCheckout(menuReferenceItems, locationOptions);
+      return;
+    }
+
+    renderFrame(`
+      <section class="view">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Place order</span>
+            <h2>Build your order</h2>
+          </div>
+          <p class="muted">Signed in as <code>${escapeHtml(state.auth.memberId)}</code></p>
+        </div>
+
+        <div class="split-layout order-layout">
+          <section class="panel">
+            <form class="auth-form" id="order-builder-form">
+              <div class="field">
+                <label for="order-member-id">Member ID</label>
+                <input class="input" id="order-member-id" name="member_id" type="text" required value="${escapeAttribute(state.auth.memberId)}" />
+              </div>
+              <div class="field">
+                <label for="order-location-id">Location</label>
+                <select class="select" id="order-location-id" name="location_id" required>
+                  <option value="">Choose a store</option>
+                  ${locationOptions
+                    .map(
+                      (location) => `
+                        <option value="${escapeAttribute(location.locationId)}">
+                          ${escapeHtml(formatLocationOptionLabel(location))}
+                        </option>
+                      `,
+                    )
+                    .join("")}
+                </select>
+                <div class="helper-text">Choose a store by name or address.</div>
+              </div>
+
+              <div class="order-items-builder">
+                <div class="section-head compact-head">
+                  <div>
+                    <span class="eyebrow">Items</span>
+                    <h2>Order lines</h2>
+                  </div>
+                  <button class="secondary-button" type="button" id="add-order-item">Add another item</button>
+                </div>
+                <div id="order-item-rows">
+                  ${createOrderItemRowMarkup(0, menuReferenceItems)}
+                </div>
+              </div>
+
+              <button class="primary-button" type="submit">Continue to checkout</button>
+            </form>
+
+            <div id="order-status"></div>
+          </section>
+
+          <aside class="panel">
+            <span class="eyebrow">How ordering works</span>
+            <p class="muted">Choose a store, add as many drinks as you want, and then head to checkout to decide whether you want to pay with card or points.</p>
+            ${
+              menuReferenceItems.length
+                ? `<div class="menu-reference">
+                    <strong>Ready to order</strong>
+                    <div class="menu-reference-list">
+                      ${menuReferenceItems
+                        .slice(0, 18)
+                        .map(
+                          (item) => `
+                            <div class="menu-reference-row">
+                              <div>
+                                <strong>${escapeHtml(item.name)}</strong>
+                                <div class="helper-text">${escapeHtml(item.size)} · ${escapeHtml(item.category)}</div>
+                              </div>
+                              <span>${escapeHtml(item.price)}</span>
+                            </div>
+                          `,
+                        )
+                        .join("")}
+                    </div>
+                  </div>`
+                : `<p class="helper-text">Menu details are loading for the item picker.</p>`
+            }
+          </aside>
+        </div>
+      </section>
+    `);
+
+    document.querySelector("#add-order-item")?.addEventListener("click", addOrderItemRow);
+    document.querySelector("#order-builder-form")?.addEventListener("submit", handleOrderDraftSubmit);
+    attachOrderItemRowHandlers();
+  } catch (error) {
+    renderErrorFrame("Order", error, "#/order");
+  }
+}
+
+function renderOrderCheckout(menuReferenceItems, locationOptions) {
+  const draft = state.orderDraft;
+  const paymentMethod = draft.paymentMethod || "card";
+  const draftItems = draft.items.map((item) => {
+    const matchedItem = menuReferenceItems.find((menuItem) => menuItem.itemId === item.item_id) || {};
+    const quantity = Number(item.quantity) || 1;
+    const priceValue = Number(matchedItem.priceValue || 0);
+    return {
+      ...item,
+      name: matchedItem.name || item.label || "Menu item",
+      size: matchedItem.size || "",
+      priceText: formatCurrency(priceValue),
+      lineTotalText: formatCurrency(priceValue * quantity),
+      lineTotalValue: roundCurrency(priceValue * quantity),
+    };
+  });
+  const totalValue = roundCurrency(draftItems.reduce((sum, item) => sum + item.lineTotalValue, 0));
+  const selectedLocation = locationOptions.find((location) => location.locationId === draft.storeId);
+
+  renderFrame(`
+    <section class="view">
+      <div class="section-head">
+        <div>
+          <span class="eyebrow">Checkout</span>
+          <h2>Choose how you'd like to pay</h2>
+        </div>
+        <p class="muted">Signed in as <code>${escapeHtml(draft.memberId)}</code></p>
+      </div>
+
+      <div class="split-layout order-layout">
+        <section class="panel">
+          <div class="checkout-summary">
+            <div class="detail-row">
+              <span class="detail-label">Store</span>
+              <span class="detail-value">${escapeHtml(selectedLocation ? formatLocationOptionLabel(selectedLocation) : draft.locationLabel || "Selected store")}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Items</span>
+              <span class="detail-value">${escapeHtml(String(draftItems.length))}</span>
+            </div>
+          </div>
+
+          <div class="checkout-line-items">
+            ${draftItems
+              .map(
+                (item) => `
+                  <div class="line-item line-item-rich">
+                    <div>
+                      <strong>${escapeHtml(item.name)}</strong>
+                      <div class="helper-text">${escapeHtml(item.size)} · Qty ${escapeHtml(String(item.quantity))} · ${escapeHtml(item.priceText)} each</div>
+                    </div>
+                    <span>${escapeHtml(item.lineTotalText)}</span>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+
+          <div class="checkout-total-row">
+            <span>Total</span>
+            <strong>${escapeHtml(formatCurrency(totalValue))}</strong>
+          </div>
+
+          <form class="auth-form" id="checkout-form">
+            <fieldset class="payment-choice-group">
+              <legend>Payment method</legend>
+              <label class="payment-choice">
+                <input type="radio" name="payment_method" value="card" ${paymentMethod === "card" ? "checked" : ""} />
+                <span>
+                  <strong>Pay with card</strong>
+                  <small>Places the order through the regular order route.</small>
+                </span>
+              </label>
+              <label class="payment-choice">
+                <input type="radio" name="payment_method" value="points" ${paymentMethod === "points" ? "checked" : ""} />
+                <span>
+                  <strong>Pay with points</strong>
+                  <small>Uses your rewards balance through the points redemption route.</small>
+                </span>
+              </label>
+            </fieldset>
+
+            <div class="checkout-actions">
+              <button class="secondary-button" type="button" id="edit-order-button">Edit order</button>
+              <button class="primary-button" type="submit">Place order</button>
+            </div>
+          </form>
+
+          <div id="order-status"></div>
+        </section>
+
+        <aside class="panel">
+          <span class="eyebrow">Almost there</span>
+          <p class="muted">Review your drinks, confirm the store, and choose whether you want to place the order normally or redeem points for the whole order.</p>
+          <p class="helper-text">Points payments use the dedicated rewards checkout route, while card payments use the regular order route.</p>
+        </aside>
+      </div>
+    </section>
+  `);
+
+  document.querySelector("#edit-order-button")?.addEventListener("click", () => {
+    state.orderDraft = null;
+    renderRoute();
+  });
+  document.querySelector("#checkout-form")?.addEventListener("submit", handleOrderSubmit);
+}
+
+function createOrderItemRowMarkup(index, menuReferenceItems = orderMenuItemOptions) {
+  return `
+    <div class="order-item-row" data-order-item-row>
+      <div class="field">
+        <label for="order-item-id-${index}">Item</label>
+        ${
+          menuReferenceItems.length
+            ? `<select class="select" id="order-item-id-${index}" name="item_id" required>
+                <option value="">Choose an item</option>
+                ${menuReferenceItems
+                  .map(
+                    (item) => `
+                      <option value="${escapeAttribute(item.itemId)}">
+                        ${escapeHtml(formatOrderItemOptionLabel(item))}
+                      </option>
+                    `,
+                  )
+                  .join("")}
+              </select>`
+            : `<input class="input" id="order-item-id-${index}" name="item_id" type="text" required placeholder="Menu item UUID or item ID" />`
+        }
+      </div>
+      <div class="field order-qty-field">
+        <label for="order-item-qty-${index}">Quantity</label>
+        <input class="input" id="order-item-qty-${index}" name="quantity" type="number" min="1" step="1" required value="1" />
+      </div>
+      <button class="ghost-button order-remove-button" type="button" data-remove-order-item>Remove</button>
+    </div>
+  `;
+}
+
+function addOrderItemRow() {
+  const rowsNode = document.querySelector("#order-item-rows");
+  if (!rowsNode) {
+    return;
+  }
+
+  const nextIndex = rowsNode.querySelectorAll("[data-order-item-row]").length;
+  rowsNode.insertAdjacentHTML("beforeend", createOrderItemRowMarkup(nextIndex));
+  attachOrderItemRowHandlers();
+}
+
+function attachOrderItemRowHandlers() {
+  document.querySelectorAll("[data-remove-order-item]").forEach((button) => {
+    button.onclick = () => {
+      const rowsNode = document.querySelector("#order-item-rows");
+      const rows = rowsNode?.querySelectorAll("[data-order-item-row]") || [];
+
+      if (rows.length <= 1) {
+        return;
+      }
+
+      button.closest("[data-order-item-row]")?.remove();
+    };
+  });
+}
+
+function handleOrderDraftSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const statusNode = document.querySelector("#order-status");
+  const memberId = String(form.querySelector('[name="member_id"]')?.value || "").trim();
+  const locationId = String(form.querySelector('[name="location_id"]')?.value || "").trim();
+  const rows = [...form.querySelectorAll("[data-order-item-row]")];
+  const items = rows
+    .map((row) => ({
+      item_id: String(row.querySelector('[name="item_id"]')?.value || "").trim(),
+      quantity: Number(row.querySelector('[name="quantity"]')?.value || 0),
+      label: row.querySelector('[name="item_id"] option:checked')?.textContent?.trim() || "",
+    }))
+    .filter((item) => item.item_id && Number.isFinite(item.quantity) && item.quantity > 0);
+
+  if (!memberId || !locationId || !items.length) {
+    statusNode.innerHTML = `
+      <div class="status-box error">
+        <strong>Missing order details</strong>
+        <span>Add a member ID, choose a location, and include at least one valid item line.</span>
+      </div>
+    `;
+    return;
+  }
+
+  const selectedLocation = form.querySelector('[name="location_id"] option:checked')?.textContent?.trim() || "";
+  state.orderDraft = {
+    memberId,
+    storeId: locationId,
+    locationLabel: selectedLocation,
+    items,
+  };
+  renderRoute();
+}
+
+async function handleOrderSubmit(event) {
+  event.preventDefault();
+  const statusNode = document.querySelector("#order-status");
+  const submitButton = event.currentTarget.querySelector('button[type="submit"]');
+  const paymentMethod = String(event.currentTarget.querySelector('[name="payment_method"]:checked')?.value || "card");
+  const draft = state.orderDraft;
+
+  if (!draft?.memberId || !draft?.storeId || !draft?.items?.length) {
+    statusNode.innerHTML = `
+      <div class="status-box error">
+        <strong>Missing order details</strong>
+        <span>Please go back and choose a store and at least one item.</span>
+      </div>
+    `;
+    return;
+  }
+
+  const payload = {
+    member_id: draft.memberId,
+    store_id: draft.storeId,
+    items: draft.items.map(({ item_id, quantity }) => ({ item_id, quantity })),
+  };
+
+  statusNode.innerHTML = `<div class="status-box"><div class="loading">Submitting order...</div></div>`;
+  submitButton.disabled = true;
+
+  try {
+    const response = await apiRequest(paymentMethod === "points" ? "/orders/redeem" : "/orders", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    statusNode.innerHTML = `
+      <div class="status-box success">
+        <strong>Order submitted</strong>
+        <span>${escapeHtml(response?.message || "Your order request was accepted by the API.")}</span>
+      </div>
+    `;
+    state.orderDraft = null;
+  } catch (error) {
+    statusNode.innerHTML = `
+      <div class="status-box error">
+        <strong>Order failed</strong>
+        <span>${escapeHtml(error.message)}</span>
+      </div>
+    `;
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+function formatLocationOptionLabel(location) {
+  const headline = location.city || location.name || "Store";
+  const details = [location.street, location.stateName || location.state, location.zip].filter(Boolean).join(", ");
+  return details ? `${headline} — ${details}` : headline;
+}
+
+function formatOrderItemOptionLabel(item) {
+  return [item.name, item.size, item.category].filter(Boolean).join(" — ");
+}
+
 function renderSignIn() {
   if (state.auth?.memberId) {
     navigate("#/account");
@@ -619,6 +1000,11 @@ function renderSignIn() {
             </div>
             <button class="primary-button" type="submit">Sign in</button>
           </form>
+
+          <div class="auth-secondary-actions">
+            <span class="helper-text">New here?</span>
+            <a class="secondary-button" href="#/register">Create an account</a>
+          </div>
 
           <div id="signin-status"></div>
         </section>
@@ -649,6 +1035,89 @@ function renderSignIn() {
   `);
 
   document.querySelector("#signin-form")?.addEventListener("submit", handleSignIn);
+}
+
+function renderRegister() {
+  if (state.auth?.memberId) {
+    navigate("#/account");
+    return;
+  }
+
+  renderFrame(`
+    <section class="view">
+      <div class="split-layout">
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">Create account</span>
+              <h2>Join the coffee club</h2>
+            </div>
+          </div>
+
+          <form class="auth-form" id="register-form">
+            <div class="field">
+              <label for="register-first-name">First name</label>
+              <input class="input" id="register-first-name" name="first_name" type="text" required autocomplete="given-name" />
+            </div>
+            <div class="field">
+              <label for="register-last-name">Last name</label>
+              <input class="input" id="register-last-name" name="last_name" type="text" required autocomplete="family-name" />
+            </div>
+            <div class="field">
+              <label for="register-email">Email</label>
+              <input class="input" id="register-email" name="email" type="email" required autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="register-phone-number">Phone number</label>
+              <input
+                class="input"
+                id="register-phone-number"
+                name="phone_number"
+                type="tel"
+                required
+                inputmode="tel"
+                autocomplete="tel"
+                placeholder="3175551234"
+              />
+            </div>
+            <button class="primary-button" type="submit">Create account</button>
+          </form>
+
+          <div class="auth-secondary-actions">
+            <span class="helper-text">Already have an account?</span>
+            <a class="secondary-button" href="#/signin">Back to sign in</a>
+          </div>
+
+          <div id="register-status"></div>
+        </section>
+
+        <aside class="panel">
+          <span class="eyebrow">You'll enter</span>
+          <div class="detail-list">
+            <div class="detail-row">
+              <span class="detail-label">First name</span>
+              <span class="detail-value">Required</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Last name</span>
+              <span class="detail-value">Required</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Email</span>
+              <span class="detail-value">Required</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Phone</span>
+              <span class="detail-value">Required</span>
+            </div>
+          </div>
+          <p class="muted">This form sends the same information shown in the register endpoint so a new member can be created directly from the site.</p>
+        </aside>
+      </div>
+    </section>
+  `);
+
+  document.querySelector("#register-form")?.addEventListener("submit", handleRegister);
 }
 
 async function handleSignIn(event) {
@@ -721,6 +1190,70 @@ async function handleSignIn(event) {
     statusNode.innerHTML = `
       <div class="status-box error">
         <strong>Sign-in failed</strong>
+        <span>${escapeHtml(error.message)}</span>
+      </div>
+    `;
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+async function handleRegister(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const statusNode = document.querySelector("#register-status");
+  const submitButton = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
+  const payload = {
+    first_name: String(formData.get("first_name") || "").trim(),
+    last_name: String(formData.get("last_name") || "").trim(),
+    email: String(formData.get("email") || "").trim(),
+    phone_number: String(formData.get("phone_number") || "").trim(),
+  };
+
+  statusNode.innerHTML = `<div class="status-box"><div class="loading">Creating your account...</div></div>`;
+  submitButton.disabled = true;
+
+  try {
+    const response = await apiRequest("/register", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    const memberId = String(response?.member_id || "").trim();
+    const profile = {
+      memberId,
+      firstName: payload.first_name,
+      lastName: payload.last_name,
+      email: payload.email,
+      phoneNumber: formatPhoneNumber(payload.phone_number) || payload.phone_number,
+      displayName: [payload.first_name, payload.last_name].filter(Boolean).join(" ") || payload.email,
+    };
+
+    if (memberId) {
+      state.auth = {
+        memberId,
+        email: payload.email,
+        profile,
+      };
+      saveSession(state.auth);
+    }
+
+    statusNode.innerHTML = `
+      <div class="status-box success">
+        <strong>Account created</strong>
+        <span>${escapeHtml(response?.message || "Your coffee club account is ready.")}</span>
+        ${memberId ? `<span>Your member ID is <code>${escapeHtml(memberId)}</code>.</span>` : ""}
+      </div>
+    `;
+
+    setTimeout(() => {
+      navigate(memberId ? "#/account" : "#/signin");
+    }, 500);
+  } catch (error) {
+    statusNode.innerHTML = `
+      <div class="status-box error">
+        <strong>Account creation failed</strong>
         <span>${escapeHtml(error.message)}</span>
       </div>
     `;
@@ -825,6 +1358,14 @@ async function renderAccount() {
               Current balance <strong>${escapeHtml(points.display)}</strong>,
               lifetime orders <strong>${escapeHtml(String(points.lifetimeOrders))}</strong>.
             </p>
+            <div>
+              <a class="secondary-button" href="#/order">Place a new order</a>
+            </div>
+            <div class="account-danger-zone">
+              <button class="danger-button" type="button" id="delete-account-button">Delete this account</button>
+              <p class="helper-text">This permanently removes the signed-in member account from the coffee club.</p>
+            </div>
+            <div id="delete-account-status"></div>
             ${
               profileResult.status === "rejected"
                 ? `<p class="helper-text">Some profile details are being shown from your sign-in information.</p>`
@@ -853,7 +1394,10 @@ async function renderAccount() {
                               <strong>Order ${escapeHtml(order.orderId)}</strong>
                               <div class="muted">${escapeHtml(order.date)}</div>
                             </div>
-                            <strong>${escapeHtml(order.total)}</strong>
+                            <div class="order-total-block">
+                              <strong>${escapeHtml(order.total)}</strong>
+                              ${order.totalSourceLabel ? `<div class="helper-text">${escapeHtml(order.totalSourceLabel)}</div>` : ""}
+                            </div>
                           </div>
                           <div class="tag-row">
                             ${order.location ? `<span class="tag">${escapeHtml(order.location)}</span>` : ""}
@@ -914,8 +1458,59 @@ async function renderAccount() {
         </section>
       </section>
     `);
+
+    document.querySelector("#delete-account-button")?.addEventListener("click", handleDeleteAccount);
   } catch (error) {
     renderErrorFrame("Account", error, "#/account");
+  }
+}
+
+async function handleDeleteAccount() {
+  const memberId = state.auth?.memberId;
+  const statusNode = document.querySelector("#delete-account-status");
+  const deleteButton = document.querySelector("#delete-account-button");
+
+  if (!memberId) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "Are you sure you want to delete this account? This action cannot be undone.",
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  statusNode.innerHTML = `<div class="status-box"><div class="loading">Deleting account...</div></div>`;
+  deleteButton.disabled = true;
+
+  try {
+    const response = await apiRequest(`/members/${encodeURIComponent(memberId)}`, {
+      method: "DELETE",
+    });
+
+    clearSession();
+    state.auth = null;
+
+    statusNode.innerHTML = `
+      <div class="status-box success">
+        <strong>Account deleted</strong>
+        <span>${escapeHtml(response?.message || "This member account has been removed.")}</span>
+      </div>
+    `;
+
+    setTimeout(() => {
+      navigate("#/");
+    }, 450);
+  } catch (error) {
+    statusNode.innerHTML = `
+      <div class="status-box error">
+        <strong>Delete failed</strong>
+        <span>${escapeHtml(error.message)}</span>
+      </div>
+    `;
+    deleteButton.disabled = false;
   }
 }
 
@@ -1524,15 +2119,86 @@ function normalizeMenuItem(item) {
   const name = String(item?.name || "Unnamed item");
   const size = item?.size ? `${item.size}` : "Standard";
   const calories = item?.calories ?? "N/A";
+  const priceValue = Number(item?.price || 0);
 
   return {
+    itemId: String(firstNonEmpty([item?.item_id, item?.itemId, item?.menu_item_id, item?.menuItemId, item?.id]) || ""),
     name,
     category: String(item?.category || "Other"),
     size,
     calories: typeof calories === "number" ? `${calories} cal` : String(calories),
-    price: formatCurrency(item?.price),
+    price: formatCurrency(priceValue),
+    priceValue,
     description: "A comforting pick from the menu.",
   };
+}
+
+async function ensureMenuCache() {
+  if (menuCache.items && menuCache.categories) {
+    return;
+  }
+
+  const [menuPayload, categoriesPayload, catalogItems] = await Promise.all([
+    apiRequest("/menu"),
+    apiRequest("/menu/categories"),
+    fetchMenuCatalogItems(),
+  ]);
+
+  const catalogIdLookup = new Map(
+    catalogItems.map((item) => [buildMenuItemSignature(item), item.itemId]).filter(([, itemId]) => itemId),
+  );
+
+  menuCache.items = Array.isArray(menuPayload?.items)
+    ? menuPayload.items.map((item) => {
+        const normalized = normalizeMenuItem(item);
+        return {
+          ...normalized,
+          itemId: normalized.itemId || catalogIdLookup.get(buildMenuItemSignature(normalized)) || "",
+        };
+      })
+    : [];
+  menuCache.categories = Array.isArray(categoriesPayload?.categories) ? categoriesPayload.categories : [];
+}
+
+async function fetchMenuCatalogItems() {
+  if (menuCache.catalogItems) {
+    return menuCache.catalogItems;
+  }
+
+  try {
+    const response = await fetch(MENU_CATALOG_URL);
+    const text = await response.text();
+    const lines = text.trim().split(/\r?\n/);
+
+    if (lines.length <= 1) {
+      menuCache.catalogItems = [];
+      return menuCache.catalogItems;
+    }
+
+    const [headerLine, ...rows] = lines;
+    const headers = headerLine.split(",").map((cell) => cell.trim());
+
+    menuCache.catalogItems = rows
+      .map((line) => line.split(","))
+      .filter((cells) => cells.length === headers.length)
+      .map((cells) => {
+        const record = Object.fromEntries(headers.map((header, index) => [header, cells[index]?.trim() || ""]));
+        return normalizeMenuItem(record);
+      });
+  } catch {
+    menuCache.catalogItems = [];
+  }
+
+  return menuCache.catalogItems;
+}
+
+function buildMenuItemSignature(item) {
+  return [
+    String(item?.name || "").trim().toLowerCase(),
+    String(item?.size || "").trim().toLowerCase(),
+    String(item?.category || "").trim().toLowerCase(),
+    String(item?.priceValue ?? "").trim(),
+  ].join("|");
 }
 
 function normalizeProfile(payload) {
@@ -1683,7 +2349,7 @@ function normalizeOrders(payload) {
 
   const orders = rawOrders.map((order, index) => {
     const orderId = String(firstNonEmpty([order?.order_id, order?.orderId, order?.id]) || `#${index + 1}`);
-    const orderTotalValue = parseMoney(firstDefined([
+    const reportedOrderTotalValue = parseMoney(firstDefined([
       order?.order_total,
       order?.total,
       order?.amount,
@@ -1708,8 +2374,16 @@ function normalizeOrders(payload) {
 
     const lineItems = lineItemsSource.map((item, itemIndex) => normalizeLineItem(item, itemIndex));
     const lineItemsSubtotal = lineItems.reduce((sum, item) => sum + item.lineTotalValue, 0);
+    const orderTotalValue =
+      reportedOrderTotalValue == null || (reportedOrderTotalValue === 0 && lineItemsSubtotal > 0)
+        ? lineItemsSubtotal
+        : reportedOrderTotalValue;
     const adjustmentValue = Number.isFinite(orderTotalValue) ? roundCurrency(orderTotalValue - lineItemsSubtotal) : 0;
     const hasAdjustment = Math.abs(adjustmentValue) >= 0.01;
+    const totalSourceLabel =
+      reportedOrderTotalValue == null || (reportedOrderTotalValue === 0 && lineItemsSubtotal > 0)
+        ? "Estimated from listed items"
+        : "";
 
     return {
       orderId,
@@ -1722,6 +2396,7 @@ function normalizeOrders(payload) {
       ]),
       status: firstNonEmpty([order?.status, order?.order_status]) || "",
       lineItems,
+      totalSourceLabel,
       adjustmentLabel: adjustmentValue < 0 ? "Discount or reward" : "Added charges",
       adjustmentText: hasAdjustment ? formatSignedCurrency(adjustmentValue) : "",
     };
@@ -1905,6 +2580,26 @@ function summarizePayloadKeys(payload) {
   }
 
   return topLevelKeys.join(", ");
+}
+
+function extractApiErrorMessage(payload, status) {
+  if (typeof payload?.detail === "string" && payload.detail.trim()) {
+    return payload.detail;
+  }
+
+  if (payload?.detail && typeof payload.detail === "object") {
+    return JSON.stringify(payload.detail);
+  }
+
+  if (typeof payload?.message === "string" && payload.message.trim()) {
+    return payload.message;
+  }
+
+  if (payload && typeof payload === "object") {
+    return JSON.stringify(payload);
+  }
+
+  return `Request failed with status ${status}`;
 }
 
 function mergeProfiles(baseProfile = {}, incomingProfile = {}) {
