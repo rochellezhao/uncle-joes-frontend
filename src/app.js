@@ -340,6 +340,8 @@ async function renderLocations() {
     const searchInput = document.querySelector("#location-search");
     const resultsNode = document.querySelector("#locations-results");
     const countNode = document.querySelector("#locations-result-count");
+    const mapCopyNode = document.querySelector("#locations-map-copy");
+    const emptyNode = document.querySelector("#locations-map-empty");
 
     const renderLocationGroups = (searchTerm = "") => {
       const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -431,11 +433,19 @@ async function renderLocations() {
     };
 
     renderLocationGroups();
+    if (mapCopyNode && emptyNode) {
+      mapCopyNode.textContent = "Gathering store map pins...";
+      emptyNode.textContent = "Map pins are loading from store details.";
+      emptyNode.classList.remove("hidden");
+    }
     searchInput?.addEventListener("input", (event) => {
       renderLocationGroups(event.target.value);
     });
 
-    hydrateLocationDetails(locations).then((hydratedLocations) => {
+    hydrateLocationDetails(locations, (hydratedLocations) => {
+      locations = hydratedLocations.sort(sortLocations);
+      renderLocationGroups(searchInput?.value || "");
+    }).then((hydratedLocations) => {
       locations = hydratedLocations.sort(sortLocations);
       renderLocationGroups(searchInput?.value || "");
     });
@@ -1773,7 +1783,7 @@ function normalizeLocation(rawAddress, index) {
   };
 }
 
-async function hydrateLocationDetails(locations) {
+async function hydrateLocationDetails(locations, onProgress) {
   const locationsWithIds = locations.filter((location) => location.locationId);
 
   if (!locationsWithIds.length) {
@@ -1781,29 +1791,54 @@ async function hydrateLocationDetails(locations) {
   }
 
   const hydratedById = new Map();
+  const initialLocations = locations.map((location) => {
+    if (location.locationId && locationDetailsCache.has(location.locationId)) {
+      const hydratedLocation = locationDetailsCache.get(location.locationId);
+      hydratedById.set(location.locationId, hydratedLocation);
+      return hydratedLocation;
+    }
+    return location;
+  });
 
-  await Promise.all(
-    locationsWithIds.map(async (location) => {
-      if (locationDetailsCache.has(location.locationId)) {
-        hydratedById.set(location.locationId, locationDetailsCache.get(location.locationId));
-        return;
-      }
+  if (typeof onProgress === "function") {
+    onProgress(initialLocations);
+  }
 
-      try {
-        const detailPayload = await apiRequest(`/locations/${encodeURIComponent(location.locationId)}`);
-        const detailRecord = extractLocationDetailRecord(detailPayload);
-        const mergedLocation = normalizeLocation(
-          mergeLocationRecords(location.sourceRecord, detailRecord),
-          location.index - 1,
-        );
-        locationDetailsCache.set(location.locationId, mergedLocation);
-        hydratedById.set(location.locationId, mergedLocation);
-      } catch {
-        locationDetailsCache.set(location.locationId, location);
-        hydratedById.set(location.locationId, location);
-      }
-    }),
-  );
+  const pendingLocations = locationsWithIds.filter((location) => !locationDetailsCache.has(location.locationId));
+  const batchSize = 12;
+  let processedCount = 0;
+
+  for (let index = 0; index < pendingLocations.length; index += batchSize) {
+    const batch = pendingLocations.slice(index, index + batchSize);
+
+    await Promise.all(
+      batch.map(async (location) => {
+        try {
+          const detailPayload = await apiRequest(`/locations/${encodeURIComponent(location.locationId)}`);
+          const detailRecord = extractLocationDetailRecord(detailPayload);
+          const mergedLocation = normalizeLocation(
+            mergeLocationRecords(location.sourceRecord, detailRecord),
+            location.index - 1,
+          );
+          locationDetailsCache.set(location.locationId, mergedLocation);
+          hydratedById.set(location.locationId, mergedLocation);
+        } catch {
+          locationDetailsCache.set(location.locationId, location);
+          hydratedById.set(location.locationId, location);
+        } finally {
+          processedCount += 1;
+        }
+      }),
+    );
+
+    if (typeof onProgress === "function") {
+      onProgress(
+        locations.map((location) => hydratedById.get(location.locationId) || location),
+        processedCount,
+        pendingLocations.length,
+      );
+    }
+  }
 
   return locations.map((location) => hydratedById.get(location.locationId) || location);
 }
