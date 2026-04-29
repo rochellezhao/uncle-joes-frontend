@@ -1,6 +1,7 @@
 const API_BASE_URL = "https://uncle-joes-api-24755618771.us-central1.run.app";
 const SESSION_KEY = "uncle-joes-session";
 const MENU_CATALOG_URL = "https://raw.githubusercontent.com/mgmt54500-sp26/uncle-joes-setup/main/uncle_joes_menu.csv";
+const POINTS_ORDERS_KEY = "uncle-joes-points-orders";
 
 const state = {
   route: window.location.hash || "#/",
@@ -215,11 +216,11 @@ function renderHome() {
     <section class="view">
       <section class="hero">
         <div class="hero-copy">
-          <span class="eyebrow">Welcome to Uncle Joe's</span>
-          <h1>Your cozy coffee corner for menu browsing, store finding, and rewards check-ins.</h1>
+          <span class="hero-welcome">Welcome to Uncle Joe's Coffee Shop</span>
+          <h1>A softer, more stylish stop for coffee runs, rewards, and easy ordering.</h1>
           <p>
-            Settle in, explore the drink menu, find a nearby shop, and sign in to see the rewards and order history
-            connected to your real member account.
+            Wander through the menu, find your nearest shop, and keep your rewards close by in one cozy little corner
+            of the web.
           </p>
           <div class="hero-actions">
             <a class="primary-button" href="#/menu">See what's brewing</a>
@@ -232,15 +233,15 @@ function renderHome() {
           </div>
           <div class="welcome-strip">
             <div class="welcome-pill">
-              <strong>Warm drinks</strong>
-              <span>Fresh picks to explore</span>
+              <strong>Daily favorites</strong>
+              <span>Fresh picks to browse</span>
             </div>
             <div class="welcome-pill">
-              <strong>Rewards</strong>
-              <span>Points for signed-in members</span>
+              <strong>Rewards ready</strong>
+              <span>Points for every visit</span>
             </div>
             <div class="welcome-pill">
-              <strong>Nearby shops</strong>
+              <strong>Nearby stops</strong>
               <span>Easy to browse by state</span>
             </div>
           </div>
@@ -255,6 +256,11 @@ function renderHome() {
               <span class="eyebrow">Morning ritual</span>
               <strong>Soft light, fresh coffee, and a calmer welcome.</strong>
             </div>
+          </article>
+          <article class="hero-mini-story">
+            <span class="eyebrow">Cafe mood</span>
+            <strong>Find your drink, choose your store, and keep the little details feeling easy.</strong>
+            <p class="muted">Built for quick cravings, slower mornings, and rewards check-ins that feel a little more polished.</p>
           </article>
         </aside>
       </section>
@@ -952,11 +958,28 @@ async function handleOrderSubmit(event) {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    const createdOrderId = String(firstNonEmpty([response?.order_id, response?.orderId, response?.id]) || "").trim();
+    let pointsSummaryMarkup = "";
+
+    if (paymentMethod === "points") {
+      rememberPointsPaidOrder(draft.memberId, createdOrderId);
+      try {
+        const refreshedPoints = normalizePoints(await apiRequest(`/members/${encodeURIComponent(draft.memberId)}/points`));
+        pointsSummaryMarkup = `
+          <span>Your updated rewards balance is <strong>${escapeHtml(refreshedPoints.display)}</strong> points.</span>
+        `;
+      } catch {
+        pointsSummaryMarkup = `
+          <span>Your points payment was sent. Refresh your account if you want to confirm the updated balance.</span>
+        `;
+      }
+    }
 
     statusNode.innerHTML = `
       <div class="status-box success">
         <strong>Order submitted</strong>
         <span>${escapeHtml(response?.message || "Your order request was accepted by the API.")}</span>
+        ${pointsSummaryMarkup}
       </div>
     `;
     state.orderDraft = null;
@@ -1411,6 +1434,7 @@ async function renderAccount() {
                           </div>
                           <div class="tag-row">
                             ${order.location ? `<span class="tag">${escapeHtml(order.location)}</span>` : ""}
+                            ${order.paymentLabel ? `<span class="tag">${escapeHtml(order.paymentLabel)}</span>` : ""}
                             ${order.status ? `<span class="tag">${escapeHtml(order.status)}</span>` : ""}
                           </div>
                           ${
@@ -2155,17 +2179,78 @@ function normalizeMenuItem(item) {
   const size = item?.size ? `${item.size}` : "Standard";
   const calories = item?.calories ?? "N/A";
   const priceValue = Number(item?.price || 0);
+  const category = String(item?.category || "Other");
 
   return {
     itemId: String(firstNonEmpty([item?.item_id, item?.itemId, item?.menu_item_id, item?.menuItemId, item?.id]) || ""),
     name,
-    category: String(item?.category || "Other"),
+    category,
     size,
     calories: typeof calories === "number" ? `${calories} cal` : String(calories),
     price: formatCurrency(priceValue),
     priceValue,
-    description: "A comforting pick from the menu.",
+    description: buildMenuDescription(name, category, size),
   };
+}
+
+function buildMenuDescription(name, category, size) {
+  const loweredName = String(name || "").toLowerCase();
+  const loweredCategory = String(category || "").toLowerCase();
+  const sizePrefix = size && size !== "Standard" ? `${size} cup with ` : "";
+
+  if (loweredName.includes("latte")) {
+    return `${sizePrefix}smooth espresso and steamed milk with a soft, cozy finish.`;
+  }
+
+  if (loweredName.includes("mocha")) {
+    return `${sizePrefix}espresso, chocolate, and milk for a richer coffee break.`;
+  }
+
+  if (loweredName.includes("cappuccino")) {
+    return `${sizePrefix}bold espresso topped with airy foam and a classic cafe feel.`;
+  }
+
+  if (loweredName.includes("chai")) {
+    return `${sizePrefix}spiced tea and milk for something warm, sweet, and comforting.`;
+  }
+
+  if (loweredName.includes("hot chocolate")) {
+    return `${sizePrefix}creamy cocoa made for slower mornings and sweeter cravings.`;
+  }
+
+  if (loweredName.includes("iced coffee")) {
+    return `${sizePrefix}chilled coffee with an easy, refreshing finish.`;
+  }
+
+  if (loweredName.includes("classic coffee")) {
+    return `${sizePrefix}simple brewed coffee with a smooth everyday flavor.`;
+  }
+
+  if (loweredName.includes("green tea")) {
+    return `${sizePrefix}light tea with a clean, gentle finish.`;
+  }
+
+  if (loweredName.includes("black tea")) {
+    return `${sizePrefix}brisk tea with a fuller flavor and a clean finish.`;
+  }
+
+  if (loweredName.includes("herbal tea")) {
+    return `${sizePrefix}caffeine-free tea for a calm, easy sip.`;
+  }
+
+  if (loweredCategory === "espresso") {
+    return `${sizePrefix}an espresso-based favorite with a smooth cafe-style finish.`;
+  }
+
+  if (loweredCategory === "coffee") {
+    return `${sizePrefix}fresh coffee with an easy, familiar flavor.`;
+  }
+
+  if (loweredCategory === "tea") {
+    return `${sizePrefix}a gentle tea pick for a relaxed moment.`;
+  }
+
+  return `${sizePrefix}a house favorite from the menu.`;
 }
 
 async function ensureMenuCache() {
@@ -2381,6 +2466,8 @@ function normalizeOrders(payload) {
         : Array.isArray(payload?.data?.orderItems)
           ? payload.data.orderItems
           : [];
+  const pointsPaidOrderIds = loadPointsPaidOrders();
+  const currentMemberId = String(state.auth?.memberId || "");
 
   const orders = rawOrders.map((order, index) => {
     const orderId = String(firstNonEmpty([order?.order_id, order?.orderId, order?.id]) || `#${index + 1}`);
@@ -2419,6 +2506,42 @@ function normalizeOrders(payload) {
       reportedOrderTotalValue == null || (reportedOrderTotalValue === 0 && lineItemsSubtotal > 0)
         ? "Estimated from listed items"
         : "";
+    const paymentMethod = String(
+      firstNonEmpty([
+        order?.payment_method,
+        order?.paymentMethod,
+        order?.payment_type,
+        order?.paymentType,
+        order?.tender_type,
+        order?.tenderType,
+      ]) || "",
+    )
+      .trim()
+      .toLowerCase();
+    const pointsRedeemedValue = Number(
+      firstDefined([
+        order?.points_redeemed,
+        order?.pointsRedeemed,
+        order?.redeemed_points,
+        order?.redeemedPoints,
+      ]) || 0,
+    );
+    const paidWithPoints =
+      paymentMethod.includes("point") ||
+      Boolean(
+        firstDefined([
+          order?.paid_with_points,
+          order?.paidWithPoints,
+          order?.redeemed_with_points,
+          order?.redeemedWithPoints,
+          order?.used_points,
+          order?.usedPoints,
+          order?.points_payment,
+          order?.pointsPayment,
+        ]),
+      ) ||
+      pointsRedeemedValue > 0 ||
+      Boolean(pointsPaidOrderIds[currentMemberId]?.includes(orderId));
 
     return {
       orderId,
@@ -2430,6 +2553,7 @@ function normalizeOrders(payload) {
         compactLocationLabel(order),
       ]),
       status: firstNonEmpty([order?.status, order?.order_status]) || "",
+      paymentLabel: paidWithPoints ? "Redeemed points" : "",
       lineItems,
       totalSourceLabel,
       adjustmentLabel: adjustmentValue < 0 ? "Discount or reward" : "Added charges",
@@ -2439,6 +2563,28 @@ function normalizeOrders(payload) {
 
   orders.orderCount = Number(firstDefined([payload?.order_count, payload?.count]) || orders.length);
   return orders;
+}
+
+function loadPointsPaidOrders() {
+  try {
+    return JSON.parse(window.localStorage.getItem(POINTS_ORDERS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function rememberPointsPaidOrder(memberId, orderId) {
+  if (!memberId || !orderId) {
+    return;
+  }
+
+  const saved = loadPointsPaidOrders();
+  const existing = Array.isArray(saved[memberId]) ? saved[memberId] : [];
+
+  if (!existing.includes(orderId)) {
+    saved[memberId] = [...existing, orderId];
+    window.localStorage.setItem(POINTS_ORDERS_KEY, JSON.stringify(saved));
+  }
 }
 
 function normalizeLineItem(item, index) {
