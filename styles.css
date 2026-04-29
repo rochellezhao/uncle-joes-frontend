@@ -781,6 +781,24 @@ select {
   gap: 0.9rem;
 }
 
+.receipt-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.receipt-hero {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem 1.05rem;
+  border-radius: 20px;
+  border: 1px solid rgba(76, 122, 96, 0.16);
+  background: linear-gradient(180deg, rgba(241, 252, 245, 0.92), rgba(232, 246, 236, 0.9));
+}
+
+.receipt-hero strong {
+  font-size: 1.25rem;
+}
+
 .checkout-total-row {
   display: flex;
   align-items: center;

@@ -8,6 +8,7 @@ const state = {
   auth: loadSession(),
   navOpen: false,
   orderDraft: null,
+  orderConfirmation: null,
 };
 
 const menuCache = {
@@ -631,6 +632,11 @@ async function renderOrderForm() {
       .sort(sortLocations)
       .filter((location) => location.locationId);
 
+    if (state.orderConfirmation?.memberId) {
+      renderOrderConfirmation(menuReferenceItems, locationOptions);
+      return;
+    }
+
     if (state.orderDraft?.memberId) {
       renderOrderCheckout(menuReferenceItems, locationOptions);
       return;
@@ -835,6 +841,111 @@ function renderOrderCheckout(menuReferenceItems, locationOptions) {
   document.querySelector("#checkout-form")?.addEventListener("submit", handleOrderSubmit);
 }
 
+function renderOrderConfirmation(menuReferenceItems, locationOptions) {
+  const confirmation = state.orderConfirmation;
+  const selectedLocation = locationOptions.find((location) => location.locationId === confirmation.storeId);
+  const receiptItems = confirmation.items.map((item) => {
+    const matchedItem = menuReferenceItems.find((menuItem) => menuItem.itemId === item.item_id) || {};
+    const quantity = Number(item.quantity) || 1;
+    const priceValue = Number(matchedItem.priceValue || 0);
+
+    return {
+      name: matchedItem.name || item.label || "Menu item",
+      size: matchedItem.size || "",
+      quantity,
+      priceText: formatCurrency(priceValue),
+      lineTotalText: formatCurrency(priceValue * quantity),
+    };
+  });
+
+  renderFrame(`
+    <section class="view">
+      <div class="section-head">
+        <div>
+          <span class="eyebrow">Order confirmed</span>
+          <h2>Your receipt is ready</h2>
+        </div>
+        <p class="muted">Order ${escapeHtml(confirmation.orderId || "submitted")}</p>
+      </div>
+
+      <div class="split-layout order-layout">
+        <section class="panel receipt-panel">
+          <div class="receipt-hero">
+            <strong>Order confirmed</strong>
+            <span>${escapeHtml(confirmation.message || "Your order was sent successfully.")}</span>
+          </div>
+
+          <div class="detail-list">
+            <div class="detail-row">
+              <span class="detail-label">Date</span>
+              <span class="detail-value">${escapeHtml(confirmation.date)}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Store</span>
+              <span class="detail-value">${escapeHtml(selectedLocation ? formatLocationOptionLabel(selectedLocation) : confirmation.locationLabel || "Selected store")}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Payment</span>
+              <span class="detail-value">${escapeHtml(confirmation.paymentLabel)}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Member</span>
+              <span class="detail-value">${escapeHtml(confirmation.memberId)}</span>
+            </div>
+          </div>
+
+          <div class="checkout-line-items">
+            ${receiptItems
+              .map(
+                (item) => `
+                  <div class="line-item line-item-rich">
+                    <div>
+                      <strong>${escapeHtml(item.name)}</strong>
+                      <div class="helper-text">${escapeHtml(item.size)} · Qty ${escapeHtml(String(item.quantity))} · ${escapeHtml(item.priceText)} each</div>
+                    </div>
+                    <span>${escapeHtml(item.lineTotalText)}</span>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+
+          <div class="checkout-total-row">
+            <span>Total</span>
+            <strong>${escapeHtml(confirmation.totalText)}</strong>
+          </div>
+
+          ${
+            confirmation.pointsSummary
+              ? `<div class="status-box success">
+                  <strong>Rewards updated</strong>
+                  <span>${escapeHtml(confirmation.pointsSummary)}</span>
+                </div>`
+              : ""
+          }
+
+          <div class="checkout-actions">
+            <button class="secondary-button" type="button" id="place-another-order-button">Place another order</button>
+            <a class="primary-button" href="#/account">View account</a>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <span class="eyebrow">Receipt</span>
+          <p class="muted">Everything went through, and this summary shows the store, payment choice, item details, and final total for the order you just placed.</p>
+          <p class="helper-text">You can head back to your account to see the updated history and rewards information.</p>
+        </aside>
+      </div>
+    </section>
+  `);
+
+  document.querySelector("#place-another-order-button")?.addEventListener("click", () => {
+    state.orderConfirmation = null;
+    state.orderDraft = null;
+    renderRoute();
+  });
+}
+
 function createOrderItemRowMarkup(index, menuReferenceItems = orderMenuItemOptions) {
   return `
     <div class="order-item-row" data-order-item-row>
@@ -959,30 +1070,39 @@ async function handleOrderSubmit(event) {
       body: JSON.stringify(payload),
     });
     const createdOrderId = String(firstNonEmpty([response?.order_id, response?.orderId, response?.id]) || "").trim();
-    let pointsSummaryMarkup = "";
+    let pointsSummaryText = "";
 
     if (paymentMethod === "points") {
       rememberPointsPaidOrder(draft.memberId, createdOrderId);
       try {
         const refreshedPoints = normalizePoints(await apiRequest(`/members/${encodeURIComponent(draft.memberId)}/points`));
-        pointsSummaryMarkup = `
-          <span>Your updated rewards balance is <strong>${escapeHtml(refreshedPoints.display)}</strong> points.</span>
-        `;
+        pointsSummaryText = `Your updated rewards balance is ${refreshedPoints.display} points.`;
       } catch {
-        pointsSummaryMarkup = `
-          <span>Your points payment was sent. Refresh your account if you want to confirm the updated balance.</span>
-        `;
+        pointsSummaryText = "Your points payment was sent. Refresh your account if you want to confirm the updated balance.";
       }
     }
 
-    statusNode.innerHTML = `
-      <div class="status-box success">
-        <strong>Order submitted</strong>
-        <span>${escapeHtml(response?.message || "Your order request was accepted by the API.")}</span>
-        ${pointsSummaryMarkup}
-      </div>
-    `;
+    const totalValue = roundCurrency(
+      draft.items.reduce((sum, item) => {
+        const matchedItem = orderMenuItemOptions.find((menuItem) => menuItem.itemId === item.item_id);
+        return sum + (Number(matchedItem?.priceValue || 0) * Number(item.quantity || 0));
+      }, 0),
+    );
+
+    state.orderConfirmation = {
+      memberId: draft.memberId,
+      storeId: draft.storeId,
+      locationLabel: draft.locationLabel,
+      items: draft.items,
+      orderId: createdOrderId,
+      message: response?.message || "Your order request was accepted by the API.",
+      paymentLabel: paymentMethod === "points" ? "Redeemed points" : "Card payment",
+      date: formatDate(new Date().toISOString()),
+      totalText: formatCurrency(totalValue),
+      pointsSummary: pointsSummaryText,
+    };
     state.orderDraft = null;
+    renderRoute();
   } catch (error) {
     statusNode.innerHTML = `
       <div class="status-box error">
